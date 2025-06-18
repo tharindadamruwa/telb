@@ -1,95 +1,75 @@
 import os
 import zipfile
-import threading
-import time
-from telegram import Update, InputFile
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler,
-    MessageHandler, ContextTypes, filters
-)
-from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from uuid import uuid4
 
-# Keep-alive thread for Replit
-def keep_alive():
-    while True:
-        time.sleep(600)
+BOT_TOKEN = "7896182510:AAHprQJ36Yuc0gqYUJeiwfT_DIZ8QqK-FRo"
+TEMP_DIR = "temp"
 
-threading.Thread(target=keep_alive).start()
-
-# Load token from .env
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# Temp folder
-TEMP_DIR = "temp_files"
+# Create temp folder if not exist
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# Store files per user
-user_files = {}
+file_cache = {}  # chat_id: [file_info_list]
 
-# /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send me files. Use /zip to get them zipped!")
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id not in file_cache:
+        file_cache[chat_id] = []
 
-# Handle documents
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    document = update.message.document
-    if not document:
-        await update.message.reply_text("Only document files are supported.")
+    file_id = update.message.document.file_id
+    file_name = update.message.document.file_name
+    message_id = update.message.message_id
+
+    file_cache[chat_id].append({
+        "file_id": file_id,
+        "file_name": file_name,
+        "message_id": message_id
+    })
+
+async def handle_zip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Please reply to one of the files you sent earlier.")
         return
 
-    file = await context.bot.get_file(document.file_id)
-    filename = f"{user_id}_{document.file_name}"
-    filepath = os.path.join(TEMP_DIR, filename)
-    await file.download_to_drive(filepath)
+    zip_name = "files.zip"
+    if context.args:
+        zip_name = f"{context.args[0]}.zip"
 
-    user_files.setdefault(user_id, []).append(filepath)
-    await update.message.reply_text(f"Saved: {document.file_name}")
+    # Filter messages up to the replied message
+    reply_to_msg_id = update.message.reply_to_message.message_id
+    files_to_zip = [f for f in file_cache.get(chat_id, []) if f["message_id"] <= reply_to_msg_id]
 
-# /zip command
-async def zip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    files = user_files.get(user_id, [])
-
-    if not files:
-        await update.message.reply_text("You haven't sent any files yet.")
+    if not files_to_zip:
+        await update.message.reply_text("Couldn't find files to zip.")
         return
 
-    zip_path = os.path.join(TEMP_DIR, f"{user_id}_files.zip")
-    with zipfile.ZipFile(zip_path, 'w') as zipf:
-        for f in files:
-            zipf.write(f, os.path.basename(f))
+    zip_path = os.path.join(TEMP_DIR, f"{uuid4().hex}.zip")
 
-    await update.message.reply_document(InputFile(zip_path))
+    with zipfile.ZipFile(zip_path, "w") as zipf:
+        for f in files_to_zip:
+            telegram_file = await context.bot.get_file(f["file_id"])
+            file_path = os.path.join(TEMP_DIR, f["file_name"])
+            await telegram_file.download_to_drive(file_path)
+            zipf.write(file_path, f["file_name"])
+            os.remove(file_path)
 
-    # Clean up
-    for f in files:
-        os.remove(f)
+    with open(zip_path, "rb") as zf:
+        await update.message.reply_document(document=zf, filename=zip_name)
+
     os.remove(zip_path)
-    user_files[user_id] = []
+    file_cache[chat_id] = []  # Clear cache after zipping
 
-    await update.message.reply_text("Here is your ZIP file!")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Send me multiple files, then reply to one with 'zip [optional_name]' to zip them.")
 
-# /clear command
-async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    for f in user_files.get(user_id, []):
-        if os.path.exists(f):
-            os.remove(f)
-    user_files[user_id] = []
-    await update.message.reply_text("Your files have been cleared.")
-
-# Main bot app
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("zip", zip_files))
-    app.add_handler(CommandHandler("clear", clear))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-
-    print("Bot running...")
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r'^zip(\s+\w+)?'), handle_zip_command))
     app.run_polling()
 
 if __name__ == "__main__":
