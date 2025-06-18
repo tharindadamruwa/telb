@@ -64,7 +64,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cleared your uploaded files.")
 
 def main():
-    app = ApplicationBuilder().token("YOUR_BOT_TOKEN_HERE").build()
+    app = ApplicationBuilder().token("7896182510:AAHprQJ36Yuc0gqYUJeiwfT_DIZ8QqK-FRo").build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("zip", zip_files))
